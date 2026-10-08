@@ -13,7 +13,7 @@
     #ui { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; z-index: 10; }
     .hud-bar { display: flex; justify-content: space-between; align-items: center; width: 100%; }
     .hud { font-size: 22px; color: #66fcf1; font-weight: bold; text-shadow: 0 0 8px rgba(102,252,241,0.6); }
-    .hud-sub { font-size: 16px; color: #45a29e; }
+    .hud-peers { font-size: 16px; color: #bd93f9; text-shadow: 0 0 8px rgba(189,147,249,0.6); }
     
     #overlay { 
       position: absolute; 
@@ -113,7 +113,7 @@
     .lb-table th { background: #1f2833; color: #66fcf1; text-align: left; padding: 8px; }
     .lb-table td { padding: 6px 8px; border-bottom: 1px solid #1f2833; }
     .lb-table tr:first-child td { color: #ffd700; font-weight: bold; }
-    .lb-status { font-size: 12px; height: 18px; margin-top: 6px; color: #66fcf1; }
+    .lb-status { font-size: 12px; height: 18px; margin-top: 6px; color: #ff4d4d; }
     .lb-close-btn { margin-top: 14px; background: transparent; border: 1px solid #c5c6c7; color: #c5c6c7; }
     .lb-close-btn:hover { background: #1f2833; color: #fff; }
   </style>
@@ -125,21 +125,21 @@
     <div id="ui">
       <div class="hud-bar">
         <div class="hud" id="scoreDisplay">SCORE: 0</div>
-        <div class="hud-sub" id="highScoreDisplay">LOCAL BEST: 0</div>
+        <div class="hud-peers" id="peerDisplay">ONLINE: 1</div>
       </div>
     </div>
     
     <div id="overlay">
       <h1 id="overlayTitle">NEON DEFLECTOR</h1>
-      <p id="overlayDesc">Move cursor/touch to guide the magnetic collector.<br>Droplets are pulled in when near.</p>
+      <p id="overlayDesc">Move mouse/touch horizontally to guide the magnetic collector.<br>Droplets are pulled in when near.</p>
       <button id="actionBtn" type="button">START MISSION</button>
     </div>
 
     <div id="leaderboardOverlay">
-      <div class="lb-title">LOCAL ARCHIVE</div>
+      <div class="lb-title">HALL OF FAME</div>
       <div class="lb-form" id="submitScoreSection">
         <input type="text" id="playerNameInput" class="lb-input" maxlength="20" placeholder="ENTER CALLSIGN">
-        <button id="submitScoreBtn" class="lb-btn" type="button">RECORD</button>
+        <button id="submitScoreBtn" class="lb-btn" type="button">SUBMIT</button>
       </div>
       <div class="lb-table-wrap">
         <table class="lb-table">
@@ -161,6 +161,8 @@
   </div>
 
   <script>
+    const API_BASE_URL = "https://leaderboard-api.kamaljp.workers.dev";
+
     let sdkReady = false;
     let audioCtx = null;
     let isMuted = false;
@@ -209,7 +211,7 @@
     const overlayDesc = document.getElementById('overlayDesc');
     const actionBtn = document.getElementById('actionBtn');
     const scoreDisplay = document.getElementById('scoreDisplay');
-    const highScoreDisplay = document.getElementById('highScoreDisplay');
+    const peerDisplay = document.getElementById('peerDisplay');
 
     const lbOverlay = document.getElementById("leaderboardOverlay");
     const lbBody = document.getElementById("leaderboardBody");
@@ -221,6 +223,7 @@
 
     let state = 'MENU';
     let score = 0;
+    // Widened collector paddle with instant tracking
     let player = { x: 420, y: 480, w: 120, h: 16 };
     let projectiles = [];
     let spawnTimer = 0;
@@ -228,45 +231,56 @@
     let backgroundOffset = 0;
     let pulseGlow = 0;
 
-    // -------------------------------------------------------------
-    // Sovereign Local Storage Engine
-    // -------------------------------------------------------------
-    const STORAGE_KEY = 'neon_leaderboard_v1';
-    let memoryLeaderboard = [
-      { player_name: 'ACE', score: 120 },
-      { player_name: 'DEFLECTOR', score: 80 },
-      { player_name: 'VECTOR', score: 40 }
-    ];
-
-    function getLocalLeaderboard() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) return JSON.parse(raw);
-      } catch (e) {}
-      return memoryLeaderboard;
-    }
-
-    function saveLocalLeaderboard(entries) {
-      memoryLeaderboard = entries;
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-      } catch (e) {}
-    }
-
-    function updateLocalBestDisplay() {
-      const entries = getLocalLeaderboard();
-      const topScore = entries.length > 0 ? entries[0].score : 0;
-      highScoreDisplay.innerText = "LOCAL BEST: " + topScore.toLocaleString();
-    }
+    let socket = null;
+    let selfPlayerId = null;
+    let peers = new Map();
+    let lastNetworkSync = 0;
 
     try {
       const cachedName = localStorage.getItem("pilot_callsign");
       if (cachedName) nameInput.value = cachedName;
     } catch (e) {}
 
-    updateLocalBestDisplay();
+    function connectMultiplayer() {
+      if (socket && socket.readyState <= 1) return;
 
-    // Instant Cursor / Touch Tracking
+      const wsProtocol = API_BASE_URL.startsWith("https") ? "wss://" : "ws://";
+      const cleanHost = API_BASE_URL.replace(/^https?:\/\//, '');
+      const playerName = encodeURIComponent(nameInput.value.trim() || 'Pilot');
+      const wsUrl = `${wsProtocol}${cleanHost}/api/room?name=${playerName}`;
+
+      try {
+        socket = new WebSocket(wsUrl);
+
+        socket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'INIT') {
+              selfPlayerId = data.selfId;
+            } else if (data.type === 'PEERS' && Array.isArray(data.players)) {
+              peers.clear();
+              for (const p of data.players) {
+                if (p.id !== selfPlayerId) {
+                  peers.set(p.id, p);
+                }
+              }
+              peerDisplay.innerText = `ONLINE: ${peers.size + 1}`;
+            } else if (data.type === 'LEAVE') {
+              peers.delete(data.id);
+              peerDisplay.innerText = `ONLINE: ${peers.size + 1}`;
+            }
+          } catch (e) {}
+        };
+
+        socket.onclose = () => {
+          setTimeout(connectMultiplayer, 3000);
+        };
+      } catch (err) {}
+    }
+
+    connectMultiplayer();
+
+    // Instant Direct Tracking: Cursor or Touch matches paddle center immediately
     function snapPaddle(clientX) {
       const rect = canvas.getBoundingClientRect();
       const scaleX = canvas.width / rect.width;
@@ -301,6 +315,7 @@
       state = 'PLAYING';
       scoreDisplay.innerText = "SCORE: 0";
       
+      // Spawn gentle initial orb
       projectiles.push({
         x: Math.random() * (canvas.width - 60) + 30,
         y: -10,
@@ -343,6 +358,16 @@
 
       if (state !== 'PLAYING') return;
 
+      // Broadcast position over WebSocket
+      const now = performance.now();
+      if (now - lastNetworkSync > 50) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'POS', x: Math.round(player.x) }));
+        }
+        lastNetworkSync = now;
+      }
+
+      // Gentle spawn cadence: every 75 frames (~1.25 seconds)
       spawnTimer++;
       if (spawnTimer % 75 === 0) {
         projectiles.push({
@@ -359,10 +384,10 @@
         const p = projectiles[i];
         p.y += p.speed;
 
-        // Magnetic Attraction
+        // Magnetic Attraction: pulls orb towards paddle when entering vicinity
         const distToPaddle = Math.hypot(p.x - paddleCenter, p.y - player.y);
         if (distToPaddle < 70 && p.y < player.y + player.h) {
-          p.x += (paddleCenter - p.x) * 0.15;
+          p.x += (paddleCenter - p.x) * 0.15; // Smooth gravitational pull
         }
 
         // Catch Collision Box
@@ -406,20 +431,33 @@
         ctx.stroke();
       }
 
-      // Player Paddle with Magnetic Glow
+      // Draw Connected Peers
+      for (const peer of peers.values()) {
+        ctx.fillStyle = 'rgba(189, 147, 249, 0.5)';
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = '#bd93f9';
+        ctx.fillRect(peer.x, player.y, player.w, player.h);
+
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#bd93f9';
+        ctx.textAlign = 'center';
+        ctx.fillText(peer.name, peer.x + (player.w / 2), player.y - 6);
+      }
+
+      // Draw Player Paddle with Magnetic Glow
       ctx.fillStyle = '#66fcf1';
       ctx.shadowBlur = 12 + (pulseGlow * 20);
       ctx.shadowColor = pulseGlow > 0 ? '#ffffff' : '#66fcf1';
       ctx.fillRect(player.x, player.y, player.w, player.h);
 
-      // Magnetic Arc Visualizer
+      // Magnetic Field Visualizer (Subtle Arc)
       ctx.strokeStyle = `rgba(102, 252, 241, ${0.15 + pulseGlow * 0.3})`;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(player.x + player.w / 2, player.y, 65, Math.PI, 0, false);
       ctx.stroke();
 
-      // Energy Droplets
+      // Draw Energy Droplets
       ctx.fillStyle = '#ff0055';
       ctx.shadowColor = '#ff0055';
       ctx.shadowBlur = 10;
@@ -434,30 +472,57 @@
       requestAnimationFrame(draw);
     }
 
-    function setStatus(msg) {
+    function setStatus(msg, isError = false) {
+      lbStatus.style.color = isError ? "#ff4d4d" : "#66fcf1";
       lbStatus.innerText = msg;
     }
 
-    function renderLeaderboard() {
-      const records = getLocalLeaderboard();
-      if (!records || records.length === 0) {
-        lbBody.innerHTML = '<tr><td colspan="3" style="text-align:center;">NO SCORES YET</td></tr>';
-        return;
-      }
+    async function fetchLeaderboard() {
+      lbBody.innerHTML = '<tr><td colspan="3" style="text-align:center;">SYNCING...</td></tr>';
+      setStatus("");
 
-      lbBody.innerHTML = records.map((row, idx) => `
-        <tr>
-          <td>${idx + 1}</td>
-          <td>${escapeHtml(row.player_name)}</td>
-          <td style="text-align: right;">${row.score.toLocaleString()}</td>
-        </tr>
-      `).join("");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/scores`, {
+          method: "GET",
+          signal: controller.signal,
+          headers: { "Accept": "application/json" }
+        });
+        clearTimeout(timeoutId);
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (!data.success || !Array.isArray(data.scores)) {
+          throw new Error("Malformed response");
+        }
+
+        if (data.scores.length === 0) {
+          lbBody.innerHTML = '<tr><td colspan="3" style="text-align:center;">NO SCORES YET</td></tr>';
+          return;
+        }
+
+        lbBody.innerHTML = data.scores.map((row, idx) => `
+          <tr>
+            <td>${idx + 1}</td>
+            <td>${escapeHtml(row.player_name)}</td>
+            <td style="text-align: right;">${row.score.toLocaleString()}</td>
+          </tr>
+        `).join("");
+
+      } catch (err) {
+        clearTimeout(timeoutId);
+        lbBody.innerHTML = '<tr><td colspan="3" style="text-align:center; color:#ff4d4d;">OFFLINE</td></tr>';
+        setStatus("Leaderboard server offline", true);
+      }
     }
 
-    function recordScore() {
+    async function submitScore() {
       const name = nameInput.value.trim();
       if (!name) {
-        setStatus("Enter a callsign");
+        setStatus("Enter a callsign", true);
         nameInput.focus();
         return;
       }
@@ -466,17 +531,43 @@
         localStorage.setItem("pilot_callsign", name);
       } catch (e) {}
 
-      const records = getLocalLeaderboard();
-      records.push({ player_name: name, score: lastGameScore });
-      records.sort((a, b) => b.score - a.score);
-      const trimmed = records.slice(0, 10);
-      
-      saveLocalLeaderboard(trimmed);
-      updateLocalBestDisplay();
-      
-      setStatus("Record saved locally");
-      submitSection.style.display = "none";
-      renderLeaderboard();
+      submitBtn.disabled = true;
+      nameInput.disabled = true;
+      setStatus("Transmitting record...");
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/scores`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify({
+            player_name: name,
+            score: lastGameScore
+          })
+        });
+        clearTimeout(timeoutId);
+
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "Failed");
+        }
+
+        setStatus("Score recorded");
+        submitSection.style.display = "none";
+        await fetchLeaderboard();
+
+      } catch (err) {
+        clearTimeout(timeoutId);
+        setStatus("Submission failed", true);
+        submitBtn.disabled = false;
+        nameInput.disabled = false;
+      }
     }
 
     function escapeHtml(str) {
@@ -495,13 +586,12 @@
         submitSection.style.display = "flex";
         submitBtn.disabled = false;
         nameInput.disabled = false;
-        setStatus("");
       } else {
         submitSection.style.display = "none";
       }
 
       lbOverlay.style.display = "flex";
-      renderLeaderboard();
+      fetchLeaderboard();
     }
 
     function hideLeaderboard() {
@@ -512,9 +602,9 @@
       overlay.style.display = "flex";
     }
 
-    submitBtn.addEventListener("click", recordScore);
+    submitBtn.addEventListener("click", submitScore);
     nameInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") recordScore();
+      if (e.key === "Enter") submitScore();
     });
     closeBtn.addEventListener("click", hideLeaderboard);
 
