@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Neon Deflector</title>
+  <script src="https://game-cdn.poki.com/scripts/v2/poki-sdk.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #0b0c10; font-family: monospace; display: flex; align-items: center; justify-content: center; }
+    #canvas-container { position: relative; width: 100vw; height: 100vh; max-width: 177.78vh; max-height: 56.25vw; }
+    canvas { width: 100%; height: 100%; display: block; background: #1f2833; }
+    #ui { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; }
+    .hud { font-size: 24px; color: #66fcf1; font-weight: bold; text-shadow: 0 0 8px rgba(102,252,241,0.6); }
+    #overlay { position: absolute; inset: 0; background: rgba(11,12,16,0.85); display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; }
+    h1 { color: #66fcf1; font-size: 40px; margin-bottom: 10px; text-shadow: 0 0 12px #66fcf1; }
+    p { color: #c5c6c7; font-size: 16px; margin-bottom: 25px; text-align: center; line-height: 1.5; }
+    button { background: #45a29e; color: #0b0c10; border: none; padding: 14px 28px; font-size: 20px; font-weight: bold; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #66fcf1; box-shadow: 0 0 15px #66fcf1; }
+  </style>
+</head>
+<body>
+  <div id="canvas-container">
+    <canvas id="gameCanvas" width="960" height="540"></canvas>
+    <div id="ui">
+      <div class="hud" id="scoreDisplay">SCORE: 0</div>
+    </div>
+    <div id="overlay">
+      <h1 id="overlayTitle">NEON DEFLECTOR</h1>
+      <p id="overlayDesc">Deflect or dodge incoming energy pulses.<br>Arrow Keys / A & D to move | Touch/Drag left/right</p>
+      <button id="actionBtn">PLAY</button>
+    </div>
+  </div>
+
+  <script>
+    let sdkReady = false;
+    let audioCtx = null;
+    let isMuted = false;
+
+    PokiSDK.init().then(() => {
+      sdkReady = true;
+      PokiSDK.gameLoadingFinished();
+    }).catch(() => {
+      sdkReady = false;
+    });
+
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function playBeep(freq, type, duration) {
+      if (!audioCtx || isMuted) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+      } catch (e) {}
+    }
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const overlay = document.getElementById('overlay');
+    const overlayTitle = document.getElementById('overlayTitle');
+    const overlayDesc = document.getElementById('overlayDesc');
+    const actionBtn = document.getElementById('actionBtn');
+    const scoreDisplay = document.getElementById('scoreDisplay');
+
+    let state = 'MENU';
+    let score = 0;
+    let player = { x: 440, y: 480, w: 80, h: 14, speed: 9 };
+    let projectiles = [];
+    let keys = {};
+    let spawnTimer = 0;
+
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const touchX = (e.touches[0].clientX - rect.left) * scaleX;
+      player.x = Math.max(0, Math.min(canvas.width - player.w, touchX - player.w / 2));
+    }, { passive: false });
+
+    function startGame() {
+      initAudio();
+      overlay.style.display = 'none';
+      projectiles = [];
+      score = 0;
+      player.x = 440;
+      state = 'PLAYING';
+      scoreDisplay.innerText = "SCORE: 0";
+      if (sdkReady) PokiSDK.gameplayStart();
+    }
+
+    function gameOver() {
+      state = 'GAMEOVER';
+      if (sdkReady) PokiSDK.gameplayStop();
+      playBeep(120, 'sawtooth', 0.4);
+      overlayTitle.innerText = "DEFLECTOR OFFLINE";
+      overlayDesc.innerText = "Final Energy Absorbed: " + score;
+      actionBtn.innerText = "RETRY";
+      overlay.style.display = 'flex';
+
+      if (sdkReady) {
+        PokiSDK.commercialBreak(() => {
+          isMuted = true;
+        }).then(() => {
+          isMuted = false;
+        });
+      }
+    }
+
+    actionBtn.addEventListener('click', startGame);
+
+    function update() {
+      if (state !== 'PLAYING') return;
+
+      if (keys['ArrowLeft'] || keys['KeyA']) player.x -= player.speed;
+      if (keys['ArrowRight'] || keys['KeyD']) player.x += player.speed;
+      player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+
+      spawnTimer++;
+      if (spawnTimer % 24 === 0) {
+        projectiles.push({
+          x: Math.random() * (canvas.width - 20) + 10,
+          y: -10,
+          r: 9,
+          speed: 4 + Math.random() * 3 + (score * 0.05)
+        });
+      }
+
+      for (let i = projectiles.length - 1; i >= 0; i--) {
+        const p = projectiles[i];
+        p.y += p.speed;
+
+        if (p.y + p.r >= player.y && p.y - p.r <= player.y + player.h &&
+            p.x + p.r >= player.x && p.x - p.r <= player.x + player.w) {
+          projectiles.splice(i, 1);
+          score += 10;
+          scoreDisplay.innerText = "SCORE: " + score;
+          playBeep(480, 'sine', 0.1);
+          continue;
+        }
+
+        if (p.y > canvas.height + 20) {
+          gameOver();
+          break;
+        }
+      }
+    }
+
+    function draw() {
+      ctx.fillStyle = '#0b0c10';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (state === 'PLAYING') {
+        ctx.fillStyle = '#66fcf1';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#66fcf1';
+        ctx.fillRect(player.x, player.y, player.w, player.h);
+
+        ctx.fillStyle = '#45a29e';
+        ctx.shadowColor = '#45a29e';
+        for (const p of projectiles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.shadowBlur = 0;
+      }
+
+      requestAnimationFrame(() => {
+        update();
+        draw();
+      });
+    }
+
+    draw();
+  </script>
+</body>
+</html>
